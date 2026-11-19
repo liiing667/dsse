@@ -33,7 +33,49 @@ Verification example:
 
 >>> result = Verify(signature_json, [('mykey', verifier)])
 >>> pprint(result)
-VerifiedPayload(payloadType='http://example.com/HelloWorld', payload=b'hello world', recognizedSigners=['mykey'])
+VerifiedPayload(payloadType='http://example.com/HelloWorld',
+                payload=b'hello world',
+                recognizedSigners=['mykey'])
+
+Threshold verification with a fixed set of two signatures:
+
+>>> signer2 = ecdsa.Signer.construct(
+...     curve='P-256',
+...     d=22222222222222222222222222222222222222222222222222222222222222222222222222222,
+...     point_x=84242469615377490621007150110633399652221266212309677932482829513771913092404,
+...     point_y=53298947259412691305666589851438561142116078896989553165381690163105754616294)
+>>> verifier2 = ecdsa.Verifier(signer2.public_key)
+>>> envelope = json.loads(signature_json)
+>>> envelope['signatures'].append(
+...     json.loads(Sign(payloadType, payload, signer2))['signatures'][0])
+>>> multi_signature_json = json.dumps(envelope)
+>>> pprint(json.loads(multi_signature_json))
+{'payload': 'aGVsbG8gd29ybGQ=',
+ 'payloadType': 'http://example.com/HelloWorld',
+ 'signatures': [{'keyid': '66301bbf',
+                 'sig': 'A3JqsQGtVsJ2O2xqrI5IcnXip5GToJ3F+FnZ+O88SjtR6rDAajabZKciJTfUiHqJPcIAriEGAHTVeCUjW2JIZA=='},
+                {'keyid': 'c6a46ab4',
+                 'sig': 'G52uGzMKf/3jqfgkhS6VVTyDYcCZaHNdU7Rj17FZjhCN6OZGEJKGagZcjh1LASmybDateV0rAtYAYlbJQ/PqoQ=='}]}
+
+Both signatures verify, so a threshold of 2 is met:
+
+>>> result = Verify(multi_signature_json,
+...                 [('mykey', verifier), ('otherkey', verifier2)],
+...                 threshold=2)
+>>> pprint(result)
+VerifiedPayload(payloadType='http://example.com/HelloWorld',
+                payload=b'hello world',
+                recognizedSigners=['mykey', 'otherkey'])
+
+The same fixed signature set fails when the threshold is not met, and no
+result is committed:
+
+>>> Verify(multi_signature_json,
+...        [('mykey', verifier), ('otherkey', verifier2)],
+...        threshold=3)
+Traceback (most recent call last):
+...
+ValueError: Only 2 distinct valid signature(s) found, threshold 3 not met
 
 PAE:
 
@@ -110,22 +152,36 @@ def Sign(payloadType: str, payload: bytes, signer: Signer) -> str:
     })
 
 
-def Verify(json_signature: str, verifiers: VerifierList) -> VerifiedPayload:
+def Verify(json_signature: str, verifiers: VerifierList,
+           threshold: int = 1) -> VerifiedPayload:
+    if threshold < 1:
+        raise ValueError('Threshold must be at least 1')
     wrapper = json.loads(json_signature)
     payloadType = wrapper['payloadType']
     payload = b64dec(wrapper['payload'])
     pae = PAE(payloadType, payload)
+    verifier_list = list(verifiers)
     recognizedSigners = []
+    # Each verifier may be recognized at most once and each signature may be
+    # attributed to at most one verifier, so that the threshold counts
+    # distinct signers.
+    used_verifiers = set()
     for signature in wrapper['signatures']:
-        for name, verifier in verifiers:
+        for index, (name, verifier) in enumerate(verifier_list):
+            if index in used_verifiers:
+                continue
             if (signature.get('keyid') is not None and
                 verifier.keyid() is not None and
                 signature.get('keyid') != verifier.keyid()):
                 continue
             if verifier.verify(pae, b64dec(signature['sig'])):
+                used_verifiers.add(index)
                 recognizedSigners.append(name)
-    if not recognizedSigners:
-        raise ValueError('No valid signature found')
+                break
+    if len(recognizedSigners) < threshold:
+        raise ValueError(
+            f'Only {len(recognizedSigners)} distinct valid signature(s) '
+            f'found, threshold {threshold} not met')
     return VerifiedPayload(payloadType, payload, recognizedSigners)
 
 
