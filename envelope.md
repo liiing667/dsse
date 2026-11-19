@@ -60,6 +60,17 @@ envelopes with individual signatures.
     An unset field MUST be treated the same as set-but-empty.
 *   Producers, or future versions of the spec, MAY add additional fields.
     Consumers MUST ignore unrecognized fields.
+*   Consumers MUST reject an envelope whose JSON text contains a duplicate
+    object member name (at any nesting level). JSON parsers that silently
+    keep the first or last duplicate can disagree about `payloadType` or
+    other fields, so a duplicate member makes the envelope's identity
+    ambiguous and unverifiable.
+*   Consumers SHOULD enforce a maximum envelope size and reject oversized
+    input before parsing.
+*   Consumers MUST validate the full envelope structure — required fields,
+    field types, base64 encodings, and a non-empty `signatures` array whose
+    entries are well-formed — and reject malformed envelopes before
+    attempting signature verification.
 
 ## Other data structures
 

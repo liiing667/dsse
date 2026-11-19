@@ -44,7 +44,12 @@ b'DSSEv1 29 http://example.com/HelloWorld 11 hello world'
 import base64, binascii, dataclasses, json, struct
 
 # Protocol requires Python 3.8+.
-from typing import Iterable, List, Optional, Protocol, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, Union
+
+# Fail-closed envelope limits, enforced before any signature verification so
+# that every consumer derives the same unique envelope identity.
+MAX_ENVELOPE_BYTES = 8 * 1024 * 1024  # 8 MiB
+MAX_SIGNATURES = 1024
 
 
 class Signer(Protocol):
@@ -71,6 +76,10 @@ class Verifier(Protocol):
 VerifierList = Iterable[Tuple[str, Verifier]]
 
 
+class EnvelopeError(ValueError):
+    """The envelope is malformed and MUST be rejected before verification."""
+
+
 @dataclasses.dataclass
 class VerifiedPayload:
     payloadType: str
@@ -88,6 +97,81 @@ def b64dec(m: str) -> bytes:
         return base64.b64decode(m, validate=True)
     except binascii.Error:
         return base64.b64decode(m, altchars='-_', validate=True)
+
+
+def _reject_duplicate_members(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """object_pairs_hook that rejects duplicate JSON object members.
+
+    json.loads silently keeps the last duplicate, which lets two parsers
+    disagree (e.g. on payloadType) about the same envelope. Reject instead.
+    """
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise EnvelopeError(f'duplicate JSON member: {key!r}')
+        obj[key] = value
+    return obj
+
+
+def _require_str(obj: Dict[str, Any], field: str, where: str) -> str:
+    value = obj.get(field)
+    if not isinstance(value, str):
+        raise EnvelopeError(f'{where}: field {field!r} must be a string')
+    return value
+
+
+def decode_envelope(json_signature: Union[str, bytes]) -> Tuple[str, bytes, List[Dict[str, Any]]]:
+    """Parses and validates an envelope, returning (payloadType, payload, signatures).
+
+    Validation is fail-closed: any structural ambiguity (oversized input,
+    invalid JSON, duplicate members, missing or mistyped required fields, or a
+    malformed signatures array) raises EnvelopeError before verification.
+    """
+    if isinstance(json_signature, str):
+        data = json_signature.encode('utf-8')
+    elif isinstance(json_signature, (bytes, bytearray)):
+        data = bytes(json_signature)
+    else:
+        raise EnvelopeError(
+            f'envelope must be str or bytes, got {type(json_signature).__name__}')
+    if len(data) > MAX_ENVELOPE_BYTES:
+        raise EnvelopeError(
+            f'envelope too large: {len(data)} bytes > {MAX_ENVELOPE_BYTES} byte limit')
+    try:
+        wrapper = json.loads(data, object_pairs_hook=_reject_duplicate_members)
+    except EnvelopeError:
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise EnvelopeError(f'invalid JSON: {e}') from e
+    if not isinstance(wrapper, dict):
+        raise EnvelopeError('envelope must be a JSON object')
+    for field in ('payload', 'payloadType', 'signatures'):
+        if field not in wrapper:
+            raise EnvelopeError(f'missing required field: {field!r}')
+    payloadType = _require_str(wrapper, 'payloadType', 'envelope')
+    try:
+        payload = b64dec(_require_str(wrapper, 'payload', 'envelope'))
+    except (binascii.Error, ValueError) as e:
+        raise EnvelopeError(f'payload is not valid base64: {e}') from e
+    signatures = wrapper['signatures']
+    if not isinstance(signatures, list) or not signatures:
+        raise EnvelopeError('signatures must be a non-empty array')
+    if len(signatures) > MAX_SIGNATURES:
+        raise EnvelopeError(
+            f'too many signatures: {len(signatures)} > {MAX_SIGNATURES} limit')
+    for index, signature in enumerate(signatures):
+        where = f'signatures[{index}]'
+        if not isinstance(signature, dict):
+            raise EnvelopeError(f'{where} must be an object')
+        if 'sig' not in signature:
+            raise EnvelopeError(f"{where}: missing required field: 'sig'")
+        try:
+            b64dec(_require_str(signature, 'sig', where))
+        except (binascii.Error, ValueError) as e:
+            raise EnvelopeError(f'{where}: sig is not valid base64: {e}') from e
+        if 'keyid' in signature and not isinstance(signature['keyid'], str):
+            raise EnvelopeError(f"{where}: field 'keyid' must be a string")
+    return payloadType, payload, signatures
 
 
 def PAE(payloadType: str, payload: bytes) -> bytes:
@@ -111,12 +195,10 @@ def Sign(payloadType: str, payload: bytes, signer: Signer) -> str:
 
 
 def Verify(json_signature: str, verifiers: VerifierList) -> VerifiedPayload:
-    wrapper = json.loads(json_signature)
-    payloadType = wrapper['payloadType']
-    payload = b64dec(wrapper['payload'])
+    payloadType, payload, signatures = decode_envelope(json_signature)
     pae = PAE(payloadType, payload)
     recognizedSigners = []
-    for signature in wrapper['signatures']:
+    for signature in signatures:
         for name, verifier in verifiers:
             if (signature.get('keyid') is not None and
                 verifier.keyid() is not None and
