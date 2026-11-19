@@ -78,6 +78,60 @@ class VerifiedPayload:
     recognizedSigners: List[str]  # List of names of signers
 
 
+@dataclasses.dataclass(frozen=True)
+class ResourceLimits:
+    """Configurable budget bounding verifier resource usage.
+
+    An envelope that exceeds any of these limits is rejected before any
+    signature is verified, so an attacker cannot make the verifier burn
+    memory or CPU before a conclusion is reached.
+    """
+    max_signatures: int = 128          # Max entries in `signatures`.
+    max_payload_size: int = 16 * 1024 * 1024  # Max decoded payload bytes.
+    max_payload_type_length: int = 2048  # Max payloadType bytes (UTF-8).
+    max_json_depth: int = 100          # Max JSON nesting depth.
+
+
+DEFAULT_LIMITS = ResourceLimits()
+
+
+class ResourceLimitExceeded(ValueError):
+    """Raised when an envelope exceeds the configured resource budget."""
+
+    def __init__(self, category: str, message: str):
+        self.category = category
+        super().__init__('%s: %s' % (category, message))
+
+
+def _json_nesting_depth(text: str) -> int:
+    """Returns the maximum nesting depth of JSON arrays/objects in `text`.
+
+    Scans the raw text so that pathologically deep input is rejected before
+    `json.loads` gets a chance to recurse on it.
+    """
+    depth = 0
+    max_depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in '{[':
+            depth += 1
+            if depth > max_depth:
+                max_depth = depth
+        elif ch in '}]':
+            depth -= 1
+    return max_depth
+
+
 def b64enc(m: bytes) -> str:
     return base64.standard_b64encode(m).decode('utf-8')
 
@@ -110,10 +164,35 @@ def Sign(payloadType: str, payload: bytes, signer: Signer) -> str:
     })
 
 
-def Verify(json_signature: str, verifiers: VerifierList) -> VerifiedPayload:
+def Verify(json_signature: str, verifiers: VerifierList,
+           limits: ResourceLimits = DEFAULT_LIMITS) -> VerifiedPayload:
+    if isinstance(json_signature, bytes):
+        json_signature = json_signature.decode('utf-8')
+    if _json_nesting_depth(json_signature) > limits.max_json_depth:
+        raise ResourceLimitExceeded(
+            'json_depth', 'JSON nesting exceeds depth %d' % limits.max_json_depth)
     wrapper = json.loads(json_signature)
     payloadType = wrapper['payloadType']
+    if len(payloadType.encode('utf-8')) > limits.max_payload_type_length:
+        raise ResourceLimitExceeded(
+            'payload_type_length',
+            'payloadType exceeds %d bytes' % limits.max_payload_type_length)
+    # Reject oversized payloads before decoding them into memory: a base64
+    # string encoding more than max_payload_size bytes is itself too long.
+    max_encoded_payload_length = 4 * ((limits.max_payload_size + 2) // 3)
+    if len(wrapper['payload']) > max_encoded_payload_length:
+        raise ResourceLimitExceeded(
+            'payload_size',
+            'payload exceeds %d bytes' % limits.max_payload_size)
     payload = b64dec(wrapper['payload'])
+    if len(payload) > limits.max_payload_size:
+        raise ResourceLimitExceeded(
+            'payload_size',
+            'payload exceeds %d bytes' % limits.max_payload_size)
+    if len(wrapper['signatures']) > limits.max_signatures:
+        raise ResourceLimitExceeded(
+            'signatures',
+            'more than %d signatures' % limits.max_signatures)
     pae = PAE(payloadType, payload)
     recognizedSigners = []
     for signature in wrapper['signatures']:
