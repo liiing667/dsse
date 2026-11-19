@@ -33,7 +33,9 @@ Verification example:
 
 >>> result = Verify(signature_json, [('mykey', verifier)])
 >>> pprint(result)
-VerifiedPayload(payloadType='http://example.com/HelloWorld', payload=b'hello world', recognizedSigners=['mykey'])
+VerifiedPayload(payloadType='http://example.com/HelloWorld',
+                payload=b'hello world',
+                recognizedSigners=['mykey'])
 
 PAE:
 
@@ -83,11 +85,19 @@ def b64enc(m: bytes) -> str:
 
 
 def b64dec(m: str) -> bytes:
-    m = m.encode('utf-8')
+    """Decodes canonical standard base64, rejecting all other encodings."""
+    if not isinstance(m, str):
+        raise TypeError('expected str, got %s' % type(m).__name__)
     try:
-        return base64.b64decode(m, validate=True)
-    except binascii.Error:
-        return base64.b64decode(m, altchars='-_', validate=True)
+        data = base64.b64decode(m.encode('utf-8'), validate=True)
+    except (binascii.Error, UnicodeError) as e:
+        raise ValueError('invalid base64: %s' % e) from e
+    # Canonical standard base64 is unique, so re-encoding must round-trip.
+    # This rejects non-canonical padding, excess data, alternative
+    # alphabets, and non-zero trailing bits.
+    if b64enc(data) != m:
+        raise ValueError('non-canonical base64 encoding')
+    return data
 
 
 def PAE(payloadType: str, payload: bytes) -> bytes:
