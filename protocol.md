@@ -1,8 +1,8 @@
 # DSSE Protocol
 
-May 10, 2024
+November 20, 2026
 
-Version 1.0.2
+Version 1.1.0
 
 This document describes the protocol/algorithm for creating and verifying DSSE
 signatures, independent of how they are transmitted or stored. For the
@@ -65,6 +65,38 @@ Functions:
     LEN(s)          = ASCII decimal encoding of the byte length of s, with no leading zeros
     ```
 
+    **PAE domain bounds (fail closed).** `type`, `body`, and the two `LEN()`
+    fields are parts of a single bounded byte domain, not independent
+    encodings, so that every conforming implementation derives the identical
+    PAE byte string:
+
+    *   `type` is the UTF-8 encoding of `PAYLOAD_TYPE` and MUST be a valid
+        UTF-8 byte sequence. Producers and verifiers MUST reject (not
+        substitute, truncate, or re-encode) a `PAYLOAD_TYPE` that has no valid
+        UTF-8 representation, such as unpaired surrogates or arbitrary
+        non-UTF-8 bytes.
+    *   The byte length of `type` MUST NOT exceed **1,048,576 bytes (1
+        MiB)** and the byte length of `body` MUST NOT exceed **1,048,576
+        bytes (1 MiB)**. These are byte lengths of the serialized fields,
+        measured before PAE is computed and independent of character counts.
+    *   `LEN()` MUST be computed from these bounded byte lengths. Any field
+        that fails UTF-8 validation or exceeds its bound MUST cause both
+        signing and verification to abort with an error before a PAE is
+        produced or a signature is checked. Implementations MUST NOT fall back
+        to a different text encoding, a different length (for example a
+        character count instead of a byte count), or silent truncation.
+    *   These bounds constrain the `type` and `body` fields only. The
+        `body`/`SERIALIZED_BODY` remains an arbitrary byte sequence that does
+        not itself need to be valid UTF-8; only `type` is restricted to UTF-8
+        text.
+
+    The reference implementation exposes the bounds as `MAX_TYPE_BYTES` and
+    `MAX_PAYLOAD_BYTES` and raises `PAEError` on any violation. Fixed
+    accept/reject vectors, including exact PAE bytes, are in
+    [`implementation/fixtures/pae_fixtures.json`](implementation/fixtures/pae_fixtures.json)
+    and are exercised by
+    [`implementation/test_pae.py`](implementation/test_pae.py).
+
 *   Sign() is an arbitrary digital signature format. Details are agreed upon
     out-of-band by the signer and verifier. This specification places no
     restriction on the signature algorithm or format.
@@ -83,6 +115,9 @@ To sign:
 
 -   Serialize the message according to PAYLOAD_TYPE. Call the result
     SERIALIZED_BODY.
+-   Validate the PAE domain: abort if PAYLOAD_TYPE is not valid UTF-8 or if
+    PAYLOAD_TYPE / SERIALIZED_BODY exceed the PAE byte bounds. Do not sign an
+    out-of-domain message.
 -   Sign PAE(UTF8(PAYLOAD_TYPE), SERIALIZED_BODY). Call the result SIGNATURE.
 -   Optionally, compute a KEYID.
 -   Encode and transmit SERIALIZED_BODY, PAYLOAD_TYPE, SIGNATURE, and KEYID,
@@ -93,6 +128,10 @@ To verify:
 -   Receive and decode SERIALIZED_BODY, PAYLOAD_TYPE, SIGNATURE, and KEYID, such
     as from the recommended [JSON envelope](envelope.md). Reject if decoding
     fails.
+-   Validate the PAE domain: reject if PAYLOAD_TYPE is not valid UTF-8, or if
+    either field exceeds the PAE byte bounds. This check happens before any
+    signature operation and fails closed, so an out-of-domain message can
+    never be accepted.
 -   Optionally, filter acceptable public keys by KEYID.
 -   Verify SIGNATURE against PAE(UTF8(PAYLOAD_TYPE), SERIALIZED_BODY). Reject if
     the verification fails.
@@ -123,6 +162,8 @@ To verify a `(t, n)`-ENVELOPE:
 
 -   Receive and decode SERIALIZED_BODY, PAYLOAD_TYPE, SIGNATURES from ENVELOPE.
     Reject if decoding fails.
+-   Validate the PAE domain: reject if PAYLOAD_TYPE is not valid UTF-8, or if
+    either field exceeds the PAE byte bounds, before checking any signature.
 -   For each (SIGNATURE, KEYID) in SIGNATURES,
     -   Optionally, filter acceptable public keys by KEYID.
     -   Verify SIGNATURE against PAE(UTF8(PAYLOAD_TYPE), SERIALIZED_BODY). Skip
@@ -137,7 +178,12 @@ To verify a `(t, n)`-ENVELOPE:
 
 ## Test Vectors
 
-See [reference implementation](implementation/signing_spec.py). Here is an
+See [reference implementation](implementation/signing_spec.py). Machine
+readable fixed fixtures with exact PAE bytes (accept vectors) and the rejection
+paths for non-UTF-8 types and over-bound fields (reject vectors) are in
+[`implementation/fixtures/pae_fixtures.json`](implementation/fixtures/pae_fixtures.json),
+exercised by
+[`implementation/test_pae.py`](implementation/test_pae.py). Here is an
 example.
 
 SERIALIZED_BODY:

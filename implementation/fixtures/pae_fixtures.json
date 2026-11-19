@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "bounds": {
+    "maxTypeBytes": 1048576,
+    "maxPayloadBytes": 1048576
+  },
+  "paeLayout": "DSSEv1 SP LEN(type) SP type SP LEN(payload) SP payload",
+  "accept": [
+    {
+      "name": "spec_hello_world",
+      "description": "Canonical protocol.md test vector; output must never change.",
+      "payloadType": "http://example.com/HelloWorld",
+      "payloadB64": "aGVsbG8gd29ybGQ=",
+      "expected": {
+        "typeLen": 29,
+        "payloadLen": 11,
+        "paeUtf8": "DSSEv1 29 http://example.com/HelloWorld 11 hello world",
+        "paeHex": "44535345763120323920687474703a2f2f6578616d706c652e636f6d2f48656c6c6f576f726c642031312068656c6c6f20776f726c64"
+      }
+    },
+    {
+      "name": "utf8_multibyte_type",
+      "description": "LEN counts bytes, not Unicode code points: 3 CJK characters are 9 UTF-8 bytes.",
+      "payloadType": "application/中文、",
+      "payloadB64": "aGVsbG8=",
+      "expected": {
+        "typeLen": 21,
+        "payloadLen": 5,
+        "paeHex": "445353457631203231206170706c69636174696f6e2fe4b8ade69687e3808120352068656c6c6f"
+      }
+    },
+    {
+      "name": "binary_payload",
+      "description": "Legitimate non-UTF-8 binary body stays byte-identical inside PAE; only the type must be UTF-8.",
+      "payloadType": "application/octet-stream",
+      "payloadB64": "AAECAv//AA==",
+      "expected": {
+        "typeLen": 24,
+        "payloadLen": 7,
+        "paeHex": "445353457631203234206170706c69636174696f6e2f6f637465742d73747265616d20372000010202ffff00"
+      }
+    }
+  ],
+  "reject": [
+    {
+      "name": "type_at_boundary_plus_one",
+      "description": "One byte over the shared type bound must be rejected before LEN is serialized.",
+      "input": {
+        "kind": "pae",
+        "payloadType": "a",
+        "payloadB64": ""
+      },
+      "descriptor": {
+        "field": "payloadType",
+        "repeatByte": "61",
+        "length": 1048577
+      },
+      "error": "PAEError"
+    },
+    {
+      "name": "payload_at_boundary_plus_one",
+      "description": "One byte over the shared body bound must be rejected before LEN is serialized.",
+      "input": {
+        "kind": "pae",
+        "payloadType": "application/octet-stream",
+        "payloadB64": ""
+      },
+      "descriptor": {
+        "field": "payload",
+        "repeatByte": "00",
+        "length": 1048577
+      },
+      "error": "PAEError"
+    },
+    {
+      "name": "type_non_utf8_bytes",
+      "description": "A non-UTF-8 type sequence (FF FE) cannot be decoded and must be rejected, never substituted.",
+      "input": {
+        "kind": "pae_raw",
+        "typeHex": "fffe",
+        "payloadB64": ""
+      },
+      "error": "PAEError"
+    },
+    {
+      "name": "type_lone_surrogate",
+      "description": "A lone surrogate string has no UTF-8 encoding and must be rejected (no replacement bytes).",
+      "input": {
+        "kind": "pae",
+        "payloadTypeEscape": "bad\\udfff surrogate",
+        "payloadB64": ""
+      },
+      "error": "PAEError"
+    }
+  ]
+}

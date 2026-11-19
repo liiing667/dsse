@@ -1,8 +1,8 @@
 # DSSE Envelope
 
-May 10, 2024
+November 20, 2026
 
-Version 1.0.2
+Version 1.1.0
 
 This document describes the recommended data structure for storing DSSE
 signatures, which we call the "JSON Envelope". For the protocol/algorithm, see
@@ -84,3 +84,11 @@ verified are the ones sent to the application layer. In particular,
 implementations MUST NOT re-parse the envelope after verification to pull out
 the payload. Failure to adhere to this requirement can lead to security
 vulnerabilities.
+
+**Domain validation (fail closed):** The JSON `payloadType` field MUST decode
+to a string with a valid UTF-8 representation, and both `payloadType` (after
+UTF-8 encoding) and the base64-decoded `payload` MUST fit within the shared
+1 MiB PAE byte bounds defined in [Protocol](protocol.md). An envelope that
+violates either rule, or that supplies a non-string `payloadType` / non-string
+`payload` field, MUST be rejected before any signature is evaluated. Binary
+payloads remain legal: only `payloadType` is constrained to UTF-8 text.

@@ -9,6 +9,8 @@ message Envelope {
   bytes payload = 1;
 
   // String unambiguously identifying how to interpret payload.
+  // MUST be valid UTF-8; its UTF-8 byte length and the payload byte length
+  // MUST each be <= 1048576 (1 MiB). Violations fail PAE/verification.
   // REQUIRED.
   string payloadType = 2;
 
