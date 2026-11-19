@@ -33,7 +33,48 @@ Verification example:
 
 >>> result = Verify(signature_json, [('mykey', verifier)])
 >>> pprint(result)
-VerifiedPayload(payloadType='http://example.com/HelloWorld', payload=b'hello world', recognizedSigners=['mykey'])
+VerifiedPayload(payloadType='http://example.com/HelloWorld',
+                payload=b'hello world',
+                recognizedSigners=['mykey'],
+                rejectedSignatures=[])
+
+Multiple distinct signers are all recognized:
+
+>>> signer2 = ecdsa.Signer.generate(curve='P-256')
+>>> verifier2 = ecdsa.Verifier(signer2.public_key)
+>>> envelope = json.loads(signature_json)
+>>> envelope['signatures'] += json.loads(
+...     Sign(payloadType, payload, signer2))['signatures']
+>>> result = Verify(json.dumps(envelope),
+...                 [('mykey', verifier), ('other', verifier2)])
+>>> sorted(result.recognizedSigners)
+['mykey', 'other']
+
+Signatures from unknown keys are reported as rejected evidence:
+
+>>> result = Verify(json.dumps(envelope), [('mykey', verifier)])
+>>> result.recognizedSigners
+['mykey']
+>>> [(r.keyid, r.reason) for r in result.rejectedSignatures
+... ]  # doctest: +ELLIPSIS
+[('...', 'no verifier accepted the signature')]
+
+Duplicate records fail closed, even if they would verify:
+
+>>> envelope = json.loads(signature_json)
+>>> envelope['signatures'].append(envelope['signatures'][0])
+>>> Verify(json.dumps(envelope), [('mykey', verifier)])  # doctest: +ELLIPSIS
+Traceback (most recent call last):
+...
+ValueError: Duplicate signature record #1 ...
+
+Ambiguous records (one signature verifying under several registered
+signers, e.g. a keyid registered twice) also fail closed:
+
+>>> Verify(signature_json, [('a', verifier), ('b', verifier)])  # doctest: +ELLIPSIS
+Traceback (most recent call last):
+...
+ValueError: Ambiguous signature record #0 ...
 
 PAE:
 
@@ -72,10 +113,19 @@ VerifierList = Iterable[Tuple[str, Verifier]]
 
 
 @dataclasses.dataclass
+class RejectedSignature:
+    keyid: Optional[str]
+    sig: str
+    reason: str
+
+
+@dataclasses.dataclass
 class VerifiedPayload:
     payloadType: str
     payload: bytes
     recognizedSigners: List[str]  # List of names of signers
+    rejectedSignatures: List[RejectedSignature] = dataclasses.field(
+        default_factory=list)
 
 
 def b64enc(m: bytes) -> str:
@@ -88,6 +138,15 @@ def b64dec(m: str) -> bytes:
         return base64.b64decode(m, validate=True)
     except binascii.Error:
         return base64.b64decode(m, altchars='-_', validate=True)
+
+
+def b64dec_typed(m: str) -> Tuple[bytes, str]:
+    """Decodes base64, also returning which alphabet was used."""
+    raw = m.encode('utf-8')
+    try:
+        return base64.b64decode(raw, validate=True), 'standard'
+    except binascii.Error:
+        return base64.b64decode(raw, altchars='-_', validate=True), 'urlsafe'
 
 
 def PAE(payloadType: str, payload: bytes) -> bytes:
@@ -115,18 +174,63 @@ def Verify(json_signature: str, verifiers: VerifierList) -> VerifiedPayload:
     payloadType = wrapper['payloadType']
     payload = b64dec(wrapper['payload'])
     pae = PAE(payloadType, payload)
+    verifier_list = list(verifiers)
+    seen_identities = set()
     recognizedSigners = []
-    for signature in wrapper['signatures']:
-        for name, verifier in verifiers:
-            if (signature.get('keyid') is not None and
+    rejectedSignatures = []
+    signatures = wrapper['signatures']
+    if not isinstance(signatures, list):
+        raise ValueError('Malformed envelope: signatures is not a list')
+    for index, signature in enumerate(signatures):
+        if not isinstance(signature, dict):
+            raise ValueError(
+                'Malformed signature record #%d: not an object' % index)
+        keyid = signature.get('keyid')
+        sig = signature.get('sig')
+        if keyid is not None and not isinstance(keyid, str):
+            raise ValueError(
+                'Malformed signature record #%d: keyid is not a string'
+                % index)
+        if not isinstance(sig, str):
+            raise ValueError(
+                'Malformed signature record #%d: sig is not a string'
+                % index)
+        try:
+            decoded_sig, encoding = b64dec_typed(sig)
+        except (binascii.Error, ValueError):
+            raise ValueError(
+                'Malformed signature record #%d (keyid=%r): '
+                'sig is not valid base64' % (index, keyid))
+        identity = (keyid, decoded_sig, encoding)
+        if identity in seen_identities:
+            raise ValueError(
+                'Duplicate signature record #%d (keyid=%r, %s base64, '
+                'sig=%r)' % (index, keyid, encoding, sig))
+        seen_identities.add(identity)
+        matches = []
+        for name, verifier in verifier_list:
+            if (keyid is not None and
                 verifier.keyid() is not None and
-                signature.get('keyid') != verifier.keyid()):
+                keyid != verifier.keyid()):
                 continue
-            if verifier.verify(pae, b64dec(signature['sig'])):
-                recognizedSigners.append(name)
+            if verifier.verify(pae, decoded_sig):
+                matches.append(name)
+        if len(matches) > 1:
+            raise ValueError(
+                'Ambiguous signature record #%d (keyid=%r): verified under '
+                'multiple signers %r' % (index, keyid, matches))
+        if matches:
+            if matches[0] not in recognizedSigners:
+                recognizedSigners.append(matches[0])
+        else:
+            rejectedSignatures.append(RejectedSignature(
+                keyid, sig, 'no verifier accepted the signature'))
     if not recognizedSigners:
-        raise ValueError('No valid signature found')
-    return VerifiedPayload(payloadType, payload, recognizedSigners)
+        raise ValueError(
+            'No valid signature found; rejected signatures: %r'
+            % (rejectedSignatures,))
+    return VerifiedPayload(
+        payloadType, payload, recognizedSigners, rejectedSignatures)
 
 
 if __name__ == '__main__':
